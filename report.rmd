@@ -1,0 +1,302 @@
+---
+title: "Analysing Log Data"
+author: "Max Philipp"
+date: "9 April 2018"
+output: 
+  html_document: 
+    code_folding: hide
+    theme: journal
+    toc: yes
+    toc_depth: 4
+    toc_float: no
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(lubridate)
+events <- read_csv("events_log.csv",
+                   col_types = cols(
+  uuid = col_character(),
+  timestamp = col_datetime(format = "%Y%m%d%H%M%S"),
+  session_id = col_character(),
+  group = col_character(),
+  action = col_character(),
+  checkin = col_integer(),
+  page_id = col_character(),
+  n_results = col_integer(),
+  result_position = col_integer()
+))
+
+events$action <- as.factor(events$action)
+events$group <- as.factor(events$group)
+events <- events %>% mutate(DoW=factor(c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday","Friday", "Saturday")[wday(timestamp)],
+                    levels=c("Monday", "Tuesday", "Wednesday", "Thursday","Friday", "Saturday","Sunday")))
+```
+
+```{r}
+summary(events)
+```
+
+> 1. What is our daily overall clickthrough rate? How does it vary between the groups?
+
+The clickthrough rate (CTR) is defined as the number of clicks per impression on a banner, advertisement or link.
+In this data a click is an "action" called "visitPage". The CTR is given by the number of page visits per landing on the searchresult page.
+
+```{r}
+events %>% summarise(visits=sum(action=="visitPage"),
+                     searches=sum(action=="searchResultPage"),
+                     CTR=round(visits/searches*100,2)) %>%
+  kable(align="l")
+```
+
+It would be false to call the CTR the chance that someone clicks on a searchresult, because there could be multiple clicks or multiple searchrequests.
+We can adjust in a simple fashion by just counting if there was a click per session. We can afterwards state: "in 38.88 % of sessions, a link will be clicked". This may be interesting for deeper analysis.
+
+```{r}
+events %>% 
+  group_by(session_id) %>% 
+  summarise(visited_a_page=("visitPage" %in% action)) %>% 
+  summarise(CTR_per_session=round(mean(visited_a_page)*100,2)) %>%
+  kable(align="l")
+```
+
+Now we look how the CTR is on our different groups (a and b).
+
+```{r}
+events %>% 
+  group_by(group) %>%
+  summarise(visits=sum(action=="visitPage"),
+            searches=sum(action=="searchResultPage"),
+            CTR=round(visits/searches*100,2)) %>%
+  kable(align="l")
+```
+
+```{r}
+events %>% 
+  group_by(group,DoW) %>%
+  summarise(visits=sum(action=="visitPage"),
+            searches=sum(action=="searchResultPage"),
+            CTR=round(visits/searches*100,2)) %>% 
+  na.omit() %>%
+  ggplot()+
+  geom_bar(aes(x=DoW,y=CTR,fill=group),stat="identity",position="dodge",color="black")+
+  scale_fill_brewer(palette="Dark2")+
+  labs(title="CTR by Day and group",x="Day of Week",y="Clickthrough Rate")
+  
+```
+
+
+We can see a big difference between the two groups: a is outperforming b significantly.
+
+> 2. Which results do people tend to try first? How does it change day-to-day?
+
+We would think that people tend to click on the very first link presented, let´s see if this assumption holds true.
+
+```{r, message=FALSE, warning=FALSE}
+tmp <- events %>%
+  filter(action=="visitPage") %>%
+  arrange(session_id,timestamp) %>%
+  group_by(session_id) %>%
+  summarise(first_click=result_position[1],
+            DoW=DoW[1])
+  ggplot(tmp,aes(x=DoW,y=first_click))+geom_jitter(shape=21,alpha=.3,fill="#ff8300")+
+  labs(title="rank of the first visited result by day",y="rank of the first visited result",x="Day of Week")
+```
+
+We have a serious outlier, someone clicked the 4103rd result of his or her search. For our visualisation we have to remove it.
+
+```{r, fig.width=8}
+ggplot(tmp %>% filter(first_click<1000),aes(x=DoW,y=first_click))+
+  geom_jitter(shape=21,alpha=.3,fill="#ff8300")+
+  labs(title="rank of the first visited result by day",
+       y="rank of the first visited result",
+       x="Day of Week",
+       subtitle="removed outliers")
+
+```
+
+We can see that the density gets higher the more closer we are to early search results. Yet we can only just observe the overall trend. To see which results are clicked the most, we have to zoom in more:
+
+```{r}
+tmp %>% 
+  group_by(DoW,first_click) %>% 
+  summarise(Clicks=n()) %>%
+  slice(1:8) %>% 
+  mutate(first_click_on=as.factor(first_click)) %>%
+  ggplot()+
+  geom_bar(aes(x=DoW,fill=first_click_on,y=Clicks),position="fill",stat="Identity",color="black")+
+  scale_fill_brewer(palette="Dark2",name="first clicked \non result number:")+
+  labs(title="proportion of clicks by rank and Day",
+       y="rank of the first visited result",
+       x="Day of Week")
+```
+
+The first result is clicked the most, followed by the second and so on. As we can see over the week, the results are stable.
+
+```{r}
+tmp %>% 
+  group_by(first_click) %>% 
+  summarise(Clicks=n()) %>%
+  filter(first_click<=20) %>%
+  ggplot()+
+  geom_bar(aes(x=first_click,y=Clicks),color="black",stat = "identity",fill="#ff8300")+
+  labs(title="number of clicks per rank",
+       x="rank of the first visited result",
+       y="Number of Clicks")
+```
+
+> 3. What is our daily overall zero results rate? How does it vary between the groups?
+
+To know how often a search leads to zero results, we only have to filter the data to only show searches and calculate the percentage of times where the number of results is 0.
+
+```{r}
+events %>%
+  filter(action=="searchResultPage") %>%
+  group_by(DoW,group) %>%
+  summarise(zero_percentage=mean(n_results==0)) %>% 
+  na.omit() %>%
+ggplot()+
+  geom_bar(aes(x=DoW,y=zero_percentage*100,fill=group),
+           stat="Identity",color="black",position="dodge")+
+  scale_fill_brewer(palette="Dark2")+
+  scale_y_continuous(breaks = seq(0,20,1))+
+  labs(title="zero results per 100 searches by day and group",
+       y="Zeros per 100 searches",
+       x="Day of Week")
+```
+
+As we can see, the zero rates are pretty equal during the week, but for some reason group *a* has less zero-results on the weekend days.
+The difference is quite large. We should investigate if this pattern can occur by chance, which seems highly unlikely since we both the days strongly and nearly equally diviate from the weekday observations.
+
+```{r}
+events %>% 
+  filter(action=="searchResultPage") %>%
+  group_by(DoW,group) %>%
+  summarise(zero_percentage=mean(n_results==0)) %>% 
+  na.omit() %>% 
+  group_by(DoW) %>% 
+  summarise(diff_zeroP=diff(zero_percentage)) %>% 
+  ggplot(aes(x=DoW,y=diff_zeroP*100))+
+  geom_bar(stat="identity",fill="#ff8300",color="black")+
+  geom_hline(yintercept=0)+
+  geom_text(aes(label=paste(round(diff_zeroP*100,1),"%")))+
+  scale_y_continuous(breaks = seq(-7.5,2.25,.25))+
+  labs(title="difference in zero-percentage of groups by day",
+       y="difference in zero-percentage of groups (A-B)",
+       x="Day of Week")
+```
+
+What we need to do to investigate this, is creating a variable which indicates if a day is on the weekend or not.
+
+ p*(1-p)/n
+
+```{r}
+events %>% 
+  mutate(we=DoW %in% c("Saturday","Sunday")) %>%
+  filter(action=="searchResultPage") %>%
+  group_by(we,group) %>%
+  summarise(zero_P=mean(n_results==0)%>%round(4),
+            zero_sd=sqrt(zero_P*(1-zero_P)/n())%>%round(4)) %>%
+  kable(align="l")
+```
+
+Given the mean and standard diviation we can calculate how likely an outcome is. 
+In this example: How likely is it, that group *a* performance on weekdays and weekend is in fact the same? 
+```{r}
+events %>% 
+  mutate(we=DoW %in% c("Saturday","Sunday")) %>%
+  filter(action=="searchResultPage") %>%
+  group_by(we,group) %>%
+  summarise(zero_P=mean(n_results==0)%>%
+              round(4),
+            zero_sd=sqrt(zero_P*(1-zero_P)/n())%>%
+              round(4)) %>%
+  group_by(group) %>%
+  summarise(p_value=diff(zero_P)/zero_sd[1],
+            chance=dnorm(p_value)) %>%
+  kable(align="l")
+```
+
+Our quick analysis shows that *a* performs significantly better on weekends and *b* performs significantly worse on weekends, both in comparison to there weekday performance.
+
+```{r}
+events %>% 
+  mutate(we=DoW %in% c("Saturday","Sunday")) %>%
+  filter(action=="searchResultPage") %>%
+  group_by(we,group) %>%
+  summarise(zero_P=mean(n_results==0)%>%
+              round(4),
+            zero_sd=sqrt(zero_P*(1-zero_P)/n())%>%
+              round(4)) %>%
+  group_by(we) %>%
+  summarise(p_value=diff(zero_P)/zero_sd[1],
+            chance=dnorm(p_value)) %>%
+  kable(align="l")
+```
+
+Now we investigae the difference between the two groups and can see, that the differnce on weekdays with a p-value of -1.35 is not significant.p=1.35 equals a chance of 15.9%, that there is differnce between the groups.
+On the other hand, on weekends the groups are significantly not from the same distribution.
+This means that there is a underlying effect and *a* is performing better than *b*.
+
+Still we need to keep in mind that we only have data from one week.
+
+
+> 4. Let session length be approximately the time between the first event and the last event in a session. Choose a variable from the dataset and describe its relationship to session length. Visualize the relationship.
+
+We can calculate the session length by summing the passed time between events. We will drop 1 permill to get rid of outliers.
+
+```{r, fig.width=8}
+tmp <- events %>%
+  group_by(session_id) %>%
+  arrange(timestamp) %>%
+  summarise(session_length=sum(diff(timestamp)),
+            group=group[1],
+            DoW=DoW[1]) %>%
+  filter(session_length>0) %>%
+  mutate(session_length_mins=as.numeric(session_length)/60)
+
+ggplot(tmp %>%
+         filter(session_length_mins<=quantile(session_length_mins,.995)))+
+  geom_boxplot(aes(x=DoW,y=session_length_mins,fill=group))+
+  scale_y_continuous(breaks=seq(0,34,3))+
+  coord_flip()+facet_wrap(~group)+
+  scale_fill_brewer(palette="Dark2")+
+  labs(title="boxplots of session length (minutes) by day and group",
+       y="Session Length (Minutes)",
+       x="Day of Week",color="group:")
+```
+
+We can interpret these boyplots in the following way:
+The orange box represents the so called "inter quartile range" (IQR), within the box, there are 50% of the data, namely every datapoint between the 25th and 75th percentiles. That means on the left side of the box there are 25% of data. In this case, 25% of the data on every day are sessions which last no longer than roughly around half a minute.
+On the other side of the box we find the remaining 25%. The horizontal straight line ("the whiskers") on the right side of the box is representing up to 95% leaving only outliers behind which are represented as dots.
+Overall we can see, that there is less time spend on searching on the weekend.
+The vertical line on the boxplots indicates the median, 50% of data are to its left, 50% to its right. 
+
+We can also look at the density distribution among weekdays, we can see that Thursdays and Wednesdays tend to have longer sessions.
+Session lengths in group *b* are significantly shorter than in group *a*
+
+```{r}
+ggplot(tmp %>% 
+         filter(session_length_mins<=quantile(session_length_mins,.995)))+
+  geom_density(aes(x=session_length_mins),fill="#ff8300")+facet_wrap(~DoW)+
+  labs(title="density of session length (minutes) by day",
+       x="Session Length (Minutes)",
+       y="Density")
+```
+
+
+> 5. Summarize your findings in an executive summary.
+
+Given our data (of one week), we have seen some interesting things: 
+
+for example that group *a* has significantly less zero-results on weekends than on weekdays, while *b* has more. 
+This could be an indicator for different patterns in user behavior.
+
+Group *b* has around 20% less CTR, which should ring a bell.
+
+We have also seen that around 75% of all sessions last only 5 minutes and an median session only 1 minute.
+
+While group *b* has a way shorter session length average.
+
+We have also learned that results which are higher ranked, are the ones which looked at first.
